@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>建築微縮模型互動地圖</title>
-    <!-- 載入 Leaflet 地圖樣式與標記聚類套件 -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.Default.css" />
@@ -14,7 +13,6 @@
         body, html { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
         #map { width: 100%; height: 100vh; z-index: 1; }
         
-        /* 側邊資訊面板 (點擊標記後展開照片與詳情) */
         #sidebar {
             position: absolute; top: 20px; right: 20px; z-index: 1000;
             width: 380px; max-height: calc(100vh - 40px);
@@ -43,16 +41,13 @@
 
 <div id="map"></div>
 
-<!-- 載入 Leaflet 與 PapaParse (解析 CSV) 套件 -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
 
 <script>
-    // 1. 初始化地圖 (視角預設於東亞/日本九州沖繩區域)
-    const map = L.map('map').setView([28.0000, 129.0000], 6);
+    const map = L.map('map').setView([26.5000, 127.8000], 7);
 
-    // 2. 底圖圖層設定 (向量圖 & 衛星圖)
     const digitalLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19, attribution: '© OpenStreetMap'
     });
@@ -69,99 +64,105 @@
     };
     L.control.layers(baseMaps).addTo(map);
 
-    // 3. 點位標記聚類
     const markersCluster = L.markerClusterGroup();
     map.addLayer(markersCluster);
 
-    // 4. 網址清洗函式：自動提取 [網址](網址) 格式中的真實圖片連結
     function cleanUrl(rawText) {
         if (!rawText) return '';
         let url = rawText.trim();
-        // 抓取括號內的完整連結
         const match = url.match(/\((https?:\/\/[^\)]+)\)/);
-        if (match) {
-            url = match[1];
-        } else {
-            // 如果只有單純中括號或純網址
-            const bracketMatch = url.match(/\[(https?:\/\/[^\]]+)\]/);
-            if (bracketMatch) url = bracketMatch[1];
-        }
+        if (match) return match[1];
+        const bracketMatch = url.match(/\[(https?:\/\/[^\]]+)\]/);
+        if (bracketMatch) return bracketMatch[1];
         return url;
     }
 
-    // 5. 自動讀取 GitHub 上的 CSV Raw 檔案
     const csvUrl = 'https://raw.githubusercontent.com/wangzziv/miniature-map-assets/main/Felt_Map_Template.csv';
 
-    Papa.parse(csvUrl, {
-        download: true,
-        header: true,
-        skipEmptyLines: true,
-        complete: function(results) {
-            const data = results.data;
-            const validBounds = [];
+    // 先用 fetch 抓取，確保不受 CORS 擋下
+    fetch(csvUrl)
+        .then(response => {
+            if (!response.ok) throw new Error('HTTP 錯誤: ' + response.status);
+            return response.text();
+        })
+        .then(csvText => {
+            Papa.parse(csvText, {
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    const data = results.data;
+                    const validBounds = [];
 
-            data.forEach(item => {
-                // 讀取經緯度 (支援 Latitude/Longitude 或 lat/lng 欄位名)
-                const latVal = item.Latitude || item.lat || item.LATITUDE;
-                const lngVal = item.Longitude || item.lng || item.LONGITUDE;
+                    data.forEach(item => {
+                        // 嘗試尋找各種可能出現的欄位 key
+                        let latVal = null, lngVal = null, rawImg = '', name = '', region = '', desc = '';
 
-                if (latVal && lngVal) {
-                    const lat = parseFloat(latVal);
-                    const lng = parseFloat(lngVal);
-
-                    if (!isNaN(lat) && !isNaN(lng)) {
-                        validBounds.push([lat, lng]);
-
-                        // 解析圖片網址 (嘗試讀取 Image_URL 或 Image 或 url)
-                        const rawImg = item.Image_URL || item.Image || item.url || '';
-                        const imgUrl = cleanUrl(rawImg);
-
-                        // 抓取名稱與說明
-                        const name = item.Name || item.title || item.A || '未命名模型';
-                        const region = item.Region || item.City || item.State || '微縮模型點位';
-                        const desc = item.Description || item.desc || '尚無詳細說明。';
-
-                        // 建立圓形紅色地圖標記
-                        const marker = L.circleMarker([lat, lng], {
-                            color: '#b71c1c',
-                            fillColor: '#e53935',
-                            fillOpacity: 0.9,
-                            radius: 8
+                        Object.keys(item).forEach(key => {
+                            const k = key.trim().toLowerCase();
+                            if (k === 'latitude' || k === 'lat' || k === '緯度' || k === 'y') latVal = item[key];
+                            if (k === 'longitude' || k === 'lng' || k === 'long' || k === '經度' || k === 'x') lngVal = item[key];
+                            if (k.includes('image') || k.includes('url') || k.includes('photo') || k.includes('picture') || k === '圖片') rawImg = item[key];
+                            if (k === 'name' || k === 'title' || k === '名稱' || k === '標題') name = item[key];
+                            if (k === 'region' || k === 'city' || k === 'state' || k === '區域' || k === '縣市') region = item[key];
+                            if (k === 'description' || k === 'desc' || k === '說明' || k === '備註') desc = item[key];
                         });
 
-                        // 滑鼠懸停提示名稱
-                        marker.bindTooltip(name, { direction: 'top', offset: [0, -6] });
+                        if (latVal && lngVal) {
+                            const lat = parseFloat(latVal);
+                            const lng = parseFloat(lngVal);
 
-                        // 點擊地圖點位：強行展開右側資訊欄，並放大大張模型圖
-                        marker.on('click', () => {
-                            document.getElementById('info-title').innerText = name;
-                            document.getElementById('info-region').innerText = region;
-                            document.getElementById('info-coords').innerText = `📍 經緯度：${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-                            
-                            const imgElem = document.getElementById('info-img');
-                            if (imgUrl) {
-                                imgElem.src = imgUrl;
-                                imgElem.style.display = 'block';
-                            } else {
-                                imgElem.style.display = 'none';
+                            if (!isNaN(lat) && !isNaN(lng)) {
+                                validBounds.push([lat, lng]);
+
+                                const imgUrl = cleanUrl(rawImg);
+                                const displayName = name || '未命名模型';
+                                const displayRegion = region || '微縮模型點位';
+                                const displayDesc = desc || '尚無詳細說明。';
+
+                                const marker = L.circleMarker([lat, lng], {
+                                    color: '#b71c1c',
+                                    fillColor: '#e53935',
+                                    fillOpacity: 0.9,
+                                    radius: 9
+                                });
+
+                                marker.bindTooltip(displayName, { direction: 'top', offset: [0, -6] });
+
+                                marker.on('click', () => {
+                                    document.getElementById('info-title').innerText = displayName;
+                                    document.getElementById('info-region').innerText = displayRegion;
+                                    document.getElementById('info-coords').innerText = `📍 經緯度：${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+                                    
+                                    const imgElem = document.getElementById('info-img');
+                                    if (imgUrl) {
+                                        imgElem.src = imgUrl;
+                                        imgElem.style.display = 'block';
+                                    } else {
+                                        imgElem.style.display = 'none';
+                                    }
+
+                                    document.getElementById('info-desc').innerText = displayDesc;
+                                    document.getElementById('sidebar').style.display = 'block';
+                                    map.panTo([lat, lng]);
+                                });
+
+                                markersCluster.addLayer(marker);
                             }
+                        }
+                    });
 
-                            document.getElementById('info-desc').innerText = desc;
-                            document.getElementById('sidebar').style.display = 'block';
-                            map.panTo([lat, lng]);
-                        });
-
-                        markersCluster.addLayer(marker);
+                    if (validBounds.length > 0) {
+                        map.fitBounds(validBounds, { padding: [50, 50] });
+                    } else {
+                        alert('CSV 資料已讀取，但未解析出有效的經緯度欄位，請檢查 CSV 表頭名稱。');
                     }
                 }
             });
-
-            // 如果有成功載入點位，自動將地圖縮放到包含所有點位的位置
-            if (validBounds.length > 0) {
-                map.fitBounds(validBounds, { padding: [50, 50] });
-            }
-        }
-    });
+        })
+        .catch(err => {
+            console.error('CSV 載入失敗:', err);
+            alert('CSV 載入失敗，請確認 Felt_Map_Template.csv 檔案是否在 main 分支根目錄下。');
+        });
 
     function closeSidebar() {
         document.getElementById('sidebar').style.display = 'none';
