@@ -25,13 +25,6 @@
         .close-btn { float: right; cursor: pointer; font-size: 22px; font-weight: bold; color: #888; }
         .region-tag { display: inline-block; background: #e3f2fd; color: #1565c0; padding: 4px 10px; border-radius: 6px; font-size: 13px; font-weight: 600; }
         .coords-tag { font-size: 12px; color: #777; margin-top: 4px; }
-        
-        .custom-red-dot {
-            background-color: #e53935;
-            border: 2px solid #ffffff;
-            border-radius: 50%;
-            box-shadow: 0 0 8px rgba(0,0,0,0.4);
-        }
     </style>
 </head>
 <body>
@@ -60,86 +53,105 @@
     digitalLayer.addTo(map);
     L.control.layers({ "🗺️ 數位向量圖": digitalLayer, "🛰️ 衛星空拍圖": satelliteLayer }).addTo(map);
 
-    const redDotIcon = L.divIcon({
-        className: 'custom-red-dot',
-        iconSize: [16, 16],
-        iconAnchor: [8, 8]
-    });
+    const markersCluster = L.markerClusterGroup();
+    map.addLayer(markersCluster);
 
-    function cleanUrl(urlStr) {
-        if (!urlStr) return '';
-        let url = urlStr.trim();
+    // 深度網址清洗與 CDN 加速轉換
+    function cleanAndOptimizeUrl(rawText) {
+        if (!rawText) return '';
+        let url = rawText.trim();
+        
+        // 抓取合法的 http(s) 網址
         const match = url.match(/(https?:\/\/[^\s\)\],]+)/);
         if (match) url = match[1];
-        try {
-            return decodeURIComponent(url);
-        } catch(e) {
-            return url;
+
+        // 自動轉為 CDN 加速圖片載入速度
+        if (url.includes('raw.githubusercontent.com')) {
+            url = url.replace('raw.githubusercontent.com/wangzziv/miniature-map-assets/refs/heads/main/', 'cdn.jsdelivr.net/gh/wangzziv/miniature-map-assets@main/')
+                     .replace('raw.githubusercontent.com/wangzziv/miniature-map-assets/main/', 'cdn.jsdelivr.net/gh/wangzziv/miniature-map-assets@main/');
         }
+        return url;
     }
 
-    // 直接指定 CSV 檔名（因為 index.html 與 CSV 在同一個資料夾，直接讀取同目錄檔案能 100% 避開網路跨域阻擋）
-    Papa.parse('Felt_Map_Template.csv', {
-        download: true,
-        skipEmptyLines: true,
-        complete: function(results) {
-            const rows = results.data;
-            const validBounds = [];
+    const csvUrl = 'Felt_Map_Template.csv?v=' + new Date().getTime();
 
-            if (!rows || rows.length <= 1) {
-                alert('未找到 CSV 資料列');
-                return;
-            }
+    fetch(csvUrl)
+        .then(res => res.text())
+        .then(rawCsv => {
+            // 清理 BOM 隱形標頭
+            const cleanCsv = rawCsv.replace(/^\uFEFF/, '');
 
-            for (let i = 1; i < rows.length; i++) {
-                const row = rows[i];
-                if (!row || row.length < 3) continue;
+            Papa.parse(cleanCsv, {
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    const validBounds = [];
 
-                const name = row[0] ? row[0].trim() : '未命名模型';
-                const lat = parseFloat(row[1]);
-                const lng = parseFloat(row[2]);
-                const region = row[3] ? row[3].trim() : (row[4] ? row[4].trim() : '微縮模型');
-                const rawImg = row[5] ? row[5].trim() : '';
-                const desc = row[6] ? row[6].trim() : '尚無詳細說明。';
+                    results.data.forEach(item => {
+                        let latVal = null, lngVal = null, rawImg = '', name = '', region = '', desc = '';
 
-                if (!isNaN(lat) && !isNaN(lng)) {
-                    validBounds.push([lat, lng]);
+                        // 彈性搜尋每個屬性，不受欄位字元與大小寫干擾
+                        Object.keys(item).forEach(key => {
+                            if (!key) return;
+                            const cleanKey = key.replace(/[^\x00-\x7F]/g, "").trim().toLowerCase();
+                            const rawKey = key.trim().toLowerCase();
 
-                    const imgUrl = cleanUrl(rawImg);
+                            if (cleanKey === 'latitude' || cleanKey === 'lat' || rawKey.includes('緯度')) latVal = item[key];
+                            if (cleanKey === 'longitude' || cleanKey === 'lng' || rawKey.includes('經度')) lngVal = item[key];
+                            if (cleanKey.includes('image') || cleanKey.includes('url') || rawKey.includes('圖片')) rawImg = item[key];
+                            if (cleanKey === 'name' || cleanKey === 'title' || rawKey.includes('名稱')) name = item[key];
+                            if (cleanKey === 'region' || cleanKey === 'city' || rawKey.includes('區域') || rawKey.includes('縣市')) region = item[key];
+                            if (cleanKey === 'description' || cleanKey === 'desc' || rawKey.includes('說明')) desc = item[key];
+                        });
 
-                    const marker = L.marker([lat, lng], { icon: redDotIcon, zIndexOffset: 1000 }).addTo(map);
+                        if (latVal && lngVal) {
+                            const lat = parseFloat(latVal);
+                            const lng = parseFloat(lngVal);
 
-                    marker.bindTooltip(name, { direction: 'top', offset: [0, -8] });
+                            if (!isNaN(lat) && !isNaN(lng)) {
+                                validBounds.push([lat, lng]);
 
-                    marker.on('click', () => {
-                        document.getElementById('info-title').innerText = name;
-                        document.getElementById('info-region').innerText = region;
-                        document.getElementById('info-coords').innerText = `📍 經緯度：${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-                        
-                        const imgElem = document.getElementById('info-img');
-                        if (imgUrl) {
-                            imgElem.src = imgUrl;
-                            imgElem.style.display = 'block';
-                        } else {
-                            imgElem.style.display = 'none';
+                                const imgUrl = cleanAndOptimizeUrl(rawImg);
+                                const displayName = name || '未命名模型';
+
+                                const marker = L.circleMarker([lat, lng], {
+                                    color: '#b71c1c',
+                                    fillColor: '#e53935',
+                                    fillOpacity: 0.9,
+                                    radius: 9
+                                });
+
+                                marker.bindTooltip(displayName, { direction: 'top', offset: [0, -6] });
+
+                                marker.on('click', () => {
+                                    document.getElementById('info-title').innerText = displayName;
+                                    document.getElementById('info-region').innerText = region || '微縮模型點位';
+                                    document.getElementById('info-coords').innerText = `📍 經緯度：${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+                                    
+                                    const imgElem = document.getElementById('info-img');
+                                    if (imgUrl) {
+                                        imgElem.src = imgUrl;
+                                        imgElem.style.display = 'block';
+                                    } else {
+                                        imgElem.style.display = 'none';
+                                    }
+
+                                    document.getElementById('info-desc').innerText = desc || '尚無詳細說明。';
+                                    document.getElementById('sidebar').style.display = 'block';
+                                    map.panTo([lat, lng]);
+                                });
+
+                                markersCluster.addLayer(marker);
+                            }
                         }
-
-                        document.getElementById('info-desc').innerText = desc;
-                        document.getElementById('sidebar').style.display = 'block';
-                        map.panTo([lat, lng]);
                     });
-                }
-            }
 
-            // 成功解析後，將視角精準對齊標點範圍
-            if (validBounds.length > 0) {
-                map.fitBounds(validBounds, { padding: [80, 80] });
-            }
-        },
-        error: function(err) {
-            alert('讀取 CSV 失敗：' + JSON.stringify(err));
-        }
-    });
+                    if (validBounds.length > 0) {
+                        map.fitBounds(validBounds, { padding: [50, 50] });
+                    }
+                }
+            });
+        });
 
     function closeSidebar() {
         document.getElementById('sidebar').style.display = 'none';
