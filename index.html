@@ -3,14 +3,169 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>微縮模型互動地圖</title>
+    <title>建築微縮模型互動地圖</title>
+    <!-- 載入 Leaflet 地圖樣式與標記聚類套件 -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.Default.css" />
+    
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body, html { width: 100%; height: 100%; overflow: hidden; }
-        iframe { width: 100%; height: 100vh; border: none; }
+        * { box-sizing: border-box; }
+        body, html { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        #map { width: 100%; height: 100vh; z-index: 1; }
+        
+        /* 側邊資訊面板 (點擊標記後展開照片與詳情) */
+        #sidebar {
+            position: absolute; top: 20px; right: 20px; z-index: 1000;
+            width: 380px; max-height: calc(100vh - 40px);
+            background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px);
+            padding: 20px; border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+            display: none; overflow-y: auto; transition: all 0.3s ease;
+        }
+        #sidebar img { width: 100%; height: auto; max-height: 300px; border-radius: 8px; margin: 12px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.15); object-fit: cover; }
+        .close-btn { float: right; cursor: pointer; font-size: 22px; font-weight: bold; color: #888; }
+        .close-btn:hover { color: #000; }
+        .region-tag { display: inline-block; background: #e3f2fd; color: #1565c0; padding: 4px 10px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+        .coords-tag { font-size: 12px; color: #777; margin-top: 4px; }
     </style>
 </head>
 <body>
-    <iframe src="https://www.google.com/maps/d/u/0/embed?mid=12aBhNWXmY9qZRpPn86GKBBh4zwMPz-M&ehbc=2E312F"></iframe>
+
+<div id="sidebar">
+    <span class="close-btn" onclick="closeSidebar()">✕</span>
+    <span id="info-region" class="region-tag">分類</span>
+    <h2 id="info-title" style="margin: 10px 0 5px 0; font-size: 18px; color: #222;">模型名稱</h2>
+    <div id="info-coords" class="coords-tag">經緯度</div>
+    <img id="info-img" src="" alt="微縮模型展示圖">
+    <p id="info-desc" style="color: #444; line-height: 1.6; font-size: 14px; margin-top: 10px;">模型詳細說明...</p>
+</div>
+
+<div id="map"></div>
+
+<!-- 載入 Leaflet 與 PapaParse (解析 CSV) 套件 -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+
+<script>
+    // 1. 初始化地圖 (視角預設於東亞/日本九州沖繩區域)
+    const map = L.map('map').setView([28.0000, 129.0000], 6);
+
+    // 2. 底圖圖層設定 (向量圖 & 衛星圖)
+    const digitalLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19, attribution: '© OpenStreetMap'
+    });
+
+    const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 18, attribution: 'Tiles © Esri'
+    });
+
+    digitalLayer.addTo(map);
+
+    const baseMaps = {
+        "🗺️ 數位向量圖": digitalLayer,
+        "🛰️ 衛星空拍圖": satelliteLayer
+    };
+    L.control.layers(baseMaps).addTo(map);
+
+    // 3. 點位標記聚類
+    const markersCluster = L.markerClusterGroup();
+    map.addLayer(markersCluster);
+
+    // 4. 網址清洗函式：自動提取 [網址](網址) 格式中的真實圖片連結
+    function cleanUrl(rawText) {
+        if (!rawText) return '';
+        let url = rawText.trim();
+        // 抓取括號內的完整連結
+        const match = url.match(/\((https?:\/\/[^\)]+)\)/);
+        if (match) {
+            url = match[1];
+        } else {
+            // 如果只有單純中括號或純網址
+            const bracketMatch = url.match(/\[(https?:\/\/[^\]]+)\]/);
+            if (bracketMatch) url = bracketMatch[1];
+        }
+        return url;
+    }
+
+    // 5. 自動讀取 GitHub 上的 CSV Raw 檔案
+    const csvUrl = 'https://raw.githubusercontent.com/wangzziv/miniature-map-assets/main/Felt_Map_Template.csv';
+
+    Papa.parse(csvUrl, {
+        download: true,
+        header: true,
+        skipEmptyLines: true,
+        complete: function(results) {
+            const data = results.data;
+            const validBounds = [];
+
+            data.forEach(item => {
+                // 讀取經緯度 (支援 Latitude/Longitude 或 lat/lng 欄位名)
+                const latVal = item.Latitude || item.lat || item.LATITUDE;
+                const lngVal = item.Longitude || item.lng || item.LONGITUDE;
+
+                if (latVal && lngVal) {
+                    const lat = parseFloat(latVal);
+                    const lng = parseFloat(lngVal);
+
+                    if (!isNaN(lat) && !isNaN(lng)) {
+                        validBounds.push([lat, lng]);
+
+                        // 解析圖片網址 (嘗試讀取 Image_URL 或 Image 或 url)
+                        const rawImg = item.Image_URL || item.Image || item.url || '';
+                        const imgUrl = cleanUrl(rawImg);
+
+                        // 抓取名稱與說明
+                        const name = item.Name || item.title || item.A || '未命名模型';
+                        const region = item.Region || item.City || item.State || '微縮模型點位';
+                        const desc = item.Description || item.desc || '尚無詳細說明。';
+
+                        // 建立圓形紅色地圖標記
+                        const marker = L.circleMarker([lat, lng], {
+                            color: '#b71c1c',
+                            fillColor: '#e53935',
+                            fillOpacity: 0.9,
+                            radius: 8
+                        });
+
+                        // 滑鼠懸停提示名稱
+                        marker.bindTooltip(name, { direction: 'top', offset: [0, -6] });
+
+                        // 點擊地圖點位：強行展開右側資訊欄，並放大大張模型圖
+                        marker.on('click', () => {
+                            document.getElementById('info-title').innerText = name;
+                            document.getElementById('info-region').innerText = region;
+                            document.getElementById('info-coords').innerText = `📍 經緯度：${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+                            
+                            const imgElem = document.getElementById('info-img');
+                            if (imgUrl) {
+                                imgElem.src = imgUrl;
+                                imgElem.style.display = 'block';
+                            } else {
+                                imgElem.style.display = 'none';
+                            }
+
+                            document.getElementById('info-desc').innerText = desc;
+                            document.getElementById('sidebar').style.display = 'block';
+                            map.panTo([lat, lng]);
+                        });
+
+                        markersCluster.addLayer(marker);
+                    }
+                }
+            });
+
+            // 如果有成功載入點位，自動將地圖縮放到包含所有點位的位置
+            if (validBounds.length > 0) {
+                map.fitBounds(validBounds, { padding: [50, 50] });
+            }
+        }
+    });
+
+    function closeSidebar() {
+        document.getElementById('sidebar').style.display = 'none';
+    }
+</script>
 </body>
 </html>
