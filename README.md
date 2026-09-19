@@ -1,0 +1,1 @@
+# miniature-map-assets
