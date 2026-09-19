@@ -56,24 +56,31 @@
     const markersCluster = L.markerClusterGroup();
     map.addLayer(markersCluster);
 
+    // 深度網址清洗：專治雙重網址、[網址](網址)、結尾逗號等雜質
     function cleanAndOptimizeUrl(rawText) {
         if (!rawText) return '';
         let url = rawText.trim();
-        const match = url.match(/\((https?:\/\/[^\)]+)\)/);
-        if (match) url = match[1];
+        
+        // 抓取第一個合法的 http(s) 連結
+        const match = url.match(/(https?:\/\/[^\s\)\],]+)/);
+        if (match) {
+            url = match[1];
+        }
+
+        // 自動轉為 CDN 加速圖片載入速度
         if (url.includes('raw.githubusercontent.com')) {
-            url = url.replace('raw.githubusercontent.com/wangzziv/miniature-map-assets/main/', 'cdn.jsdelivr.net/gh/wangzziv/miniature-map-assets@main/');
+            url = url.replace('raw.githubusercontent.com/wangzziv/miniature-map-assets/refs/heads/main/', 'cdn.jsdelivr.net/gh/wangzziv/miniature-map-assets@main/')
+                     .replace('raw.githubusercontent.com/wangzziv/miniature-map-assets/main/', 'cdn.jsdelivr.net/gh/wangzziv/miniature-map-assets@main/');
         }
         return url;
     }
 
-    // 加上時間戳記強迫避免瀏覽器快取舊 CSV
-    const csvUrl = 'https://raw.githubusercontent.com/wangzziv/miniature-map-assets/main/Felt_Map_Template.csv?v=' + new Date().getTime();
+    const csvUrl = 'https://raw.githubusercontent.com/wangzziv/miniature-map-assets/main/Felt_Map_Template.csv?t=' + new Date().getTime();
 
     fetch(csvUrl)
         .then(response => response.text())
         .then(rawCsv => {
-            // 強制移除隱形的 BOM 標頭與雜質
+            // 清理隱形 BOM
             const cleanCsv = rawCsv.replace(/^\uFEFF/, '');
 
             Papa.parse(cleanCsv, {
@@ -85,7 +92,6 @@
                     results.data.forEach(item => {
                         let latVal = null, lngVal = null, rawImg = '', name = '', region = '', desc = '';
 
-                        // 精準清洗欄位 key，解決隱形字元干擾問題
                         Object.keys(item).forEach(key => {
                             const cleanKey = key.replace(/[^\x00-\x7F]/g, "").trim().toLowerCase();
                             const rawKey = key.trim().toLowerCase();
